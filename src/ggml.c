@@ -4291,8 +4291,8 @@ struct ggml_tensor * ggml_clamp(
         struct ggml_tensor  * a,
         float                 min,
         float                 max) {
-    // TODO: when implement backward, fix this:
-    struct ggml_tensor * result = ggml_view_tensor(ctx, a);
+    // Use dup_tensor instead of view_tensor to support backward pass
+    struct ggml_tensor * result = ggml_dup_tensor(ctx, a);
 
     float params[] = { min, max };
     ggml_set_op_params(result, params, sizeof(params));
@@ -6369,6 +6369,30 @@ static void ggml_compute_backward(
                 ggml_add_or_set(ctx, cgraph, isrc0, ggml_scale_impl(ctx, grad, s, 0.0, false));
             }
         } break;
+        case GGML_OP_CLAMP: {
+            // Clamp backward: gradient passes through where min <= x <= max, zero otherwise
+            // grad_src0 = grad * step(src0 - min) * step(max - src0)
+            if (src0_needs_grads) {
+                float params[2];
+                memcpy(params, tensor->op_params, sizeof(params));
+                float min_val = params[0];
+                float max_val = params[1];
+
+                // mask_low = step(src0 - min) = 1 where src0 >= min
+                // Use scale_impl with scale=1, bias=-min_val to compute src0 - min
+                struct ggml_tensor * shifted_low = ggml_scale_impl(ctx, src0, 1.0f, -min_val, false);
+                struct ggml_tensor * mask_low = ggml_step(ctx, shifted_low);
+
+                // mask_high = step(max - src0) = 1 where src0 <= max
+                // Use scale_impl with scale=-1, bias=max_val to compute max - src0
+                struct ggml_tensor * shifted_high = ggml_scale_impl(ctx, src0, -1.0f, max_val, false);
+                struct ggml_tensor * mask_high = ggml_step(ctx, shifted_high);
+
+                // Combined mask and apply to gradient
+                struct ggml_tensor * mask = ggml_mul(ctx, mask_low, mask_high);
+                ggml_add_or_set(ctx, cgraph, isrc0, ggml_mul(ctx, grad, mask));
+            }
+        } break;
         case GGML_OP_SET: {
             const size_t nb1    = ((const int32_t *) tensor->op_params)[0];
             const size_t nb2    = ((const int32_t *) tensor->op_params)[1];
@@ -6630,6 +6654,44 @@ static void ggml_compute_backward(
                 default: {
                     GGML_ABORT("unsupported glu op for backward pass: %s", ggml_glu_op_name(ggml_get_glu_op(tensor)));
                 } //break;
+            }
+        } break;
+        case GGML_OP_CONCAT: {
+            // Concat backward: split gradient along the concat dimension
+            const int dim = ggml_get_op_params_i32(tensor, 0);
+
+            if (src0_needs_grads) {
+                // grad_src0 = grad[:..., 0:src0->ne[dim], ...]
+                // Use view to extract the first part
+                size_t offset = 0;
+                struct ggml_tensor * grad_src0;
+                if (dim == 0) {
+                    grad_src0 = ggml_view_4d(ctx, grad,
+                        src0->ne[0], src0->ne[1], src0->ne[2], src0->ne[3],
+                        grad->nb[1], grad->nb[2], grad->nb[3], offset);
+                } else if (dim == 1) {
+                    grad_src0 = ggml_view_4d(ctx, grad,
+                        src0->ne[0], src0->ne[1], src0->ne[2], src0->ne[3],
+                        grad->nb[1], grad->nb[2], grad->nb[3], offset);
+                } else if (dim == 2) {
+                    grad_src0 = ggml_view_4d(ctx, grad,
+                        src0->ne[0], src0->ne[1], src0->ne[2], src0->ne[3],
+                        grad->nb[1], grad->nb[2], grad->nb[3], offset);
+                } else {
+                    grad_src0 = ggml_view_4d(ctx, grad,
+                        src0->ne[0], src0->ne[1], src0->ne[2], src0->ne[3],
+                        grad->nb[1], grad->nb[2], grad->nb[3], offset);
+                }
+                ggml_add_or_set(ctx, cgraph, isrc0, ggml_reshape(ctx, ggml_cont(ctx, grad_src0), src0));
+            }
+            if (src1_needs_grads) {
+                // grad_src1 = grad[:..., src0->ne[dim]:, ...]
+                // Offset is src0->ne[dim] * stride along that dimension
+                size_t offset = src0->ne[dim] * grad->nb[dim];
+                struct ggml_tensor * grad_src1 = ggml_view_4d(ctx, grad,
+                    src1->ne[0], src1->ne[1], src1->ne[2], src1->ne[3],
+                    grad->nb[1], grad->nb[2], grad->nb[3], offset);
+                ggml_add_or_set(ctx, cgraph, isrc1, ggml_reshape(ctx, ggml_cont(ctx, grad_src1), src1));
             }
         } break;
         case GGML_OP_NONE: {
