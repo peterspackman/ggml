@@ -6328,10 +6328,13 @@ static void ggml_compute_backward(
             if (src0_needs_grads) {
                 GGML_ASSERT(grad->ne[2] == src1->ne[2]);
                 GGML_ASSERT(grad->ne[3] == src1->ne[3]);
+                // Ensure inputs are contiguous for out_prod (required by cuBLAS/rocBLAS)
+                struct ggml_tensor * src1_cont = ggml_is_contiguous(src1) ? src1 : ggml_cont(ctx, src1);
+                struct ggml_tensor * grad_cont = ggml_is_contiguous(grad) ? grad : ggml_cont(ctx, grad);
                 struct ggml_tensor * tmp =
                     ggml_out_prod(ctx, // [n,m,qq,rr]
-                        src1,          // [n,p,qq,rr]
-                        grad);         // [m,p,qq,rr]
+                        src1_cont,     // [n,p,qq,rr]
+                        grad_cont);    // [m,p,qq,rr]
                 if (!ggml_are_same_shape(tmp, src0)) {
                     GGML_ASSERT(tmp->ne[0] == src0->ne[0]);
                     GGML_ASSERT(tmp->ne[1] == src0->ne[1]);
@@ -6347,19 +6350,14 @@ static void ggml_compute_backward(
                 ggml_add_or_set(ctx, cgraph, isrc0, tmp);
             }
             if (src1_needs_grads) {
+                // Ensure inputs are contiguous for out_prod (required by cuBLAS/rocBLAS)
+                // Note: ggml_transpose creates a non-contiguous view, so wrap with ggml_cont
+                struct ggml_tensor * src0_cont = ggml_is_contiguous(src0) ? src0 : ggml_cont(ctx, src0);
+                struct ggml_tensor * grad_transposed = ggml_cont(ctx, ggml_transpose(ctx, grad));
                 ggml_add_or_set(ctx, cgraph, isrc1,
-                        // ggml_mul_mat(ctx,                   // [n,p,qq,rr]
-                        //     ggml_cont(ctx,                  // [m,n,q1,r1]
-                        //         ggml_transpose(ctx, src0)), // [m,n,q1,r1]
-                        //     grad),                          // [m,p,qq,rr]
-
-                        // when src0 is bigger than tensor->grad (this is mostly the case in llama),
-                        // avoid transpose of src0, rather transpose smaller tensor->grad
-                        // and then use ggml_out_prod
                         ggml_out_prod(ctx,      // [n,p,qq,rr]
-                            src0,               // [n,m,q1,r1]
-                            ggml_transpose(ctx, // [p,m,qq,rr]
-                                grad)));        // [m,p,qq,rr]
+                            src0_cont,          // [n,m,q1,r1]
+                            grad_transposed));  // [p,m,qq,rr]
             }
         } break;
         case GGML_OP_SCALE: {
