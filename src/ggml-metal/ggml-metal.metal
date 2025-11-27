@@ -10547,3 +10547,36 @@ kernel void kernel_count_equal(
 typedef decltype(kernel_count_equal<int32_t>) kernel_count_equal_t;
 
 template [[host_name("kernel_count_equal_i32")]] kernel kernel_count_equal_t kernel_count_equal<int32_t>;
+
+// Outer product kernel
+// dst[i0,i1,i2,i3] = sum_{k} src0[i0,k,i02,i03] * src1[i1,k,i2,i3]
+// where i02 = i2 / (ne2/ne02), i03 = i3 / (ne3/ne03) for broadcasting
+kernel void kernel_out_prod_f32(
+        constant ggml_metal_kargs_out_prod & args,
+        device const float * src0,
+        device const float * src1,
+        device       float * dst,
+        uint3   tgpig[[threadgroup_position_in_grid]],
+        ushort3 tpitg[[thread_position_in_threadgroup]],
+        ushort3   ntg[[threads_per_threadgroup]]) {
+    const int i3 = tgpig.z;
+    const int i2 = tgpig.y;
+    const int i1 = tgpig.x;
+
+    const int dps2 = args.ne2 / args.ne02;
+    const int dps3 = args.ne3 / args.ne03;
+    const int i02 = i2 / dps2;
+    const int i03 = i3 / dps3;
+
+    device float * dst_ptr = dst + i1*args.nb1/sizeof(float) + i2*args.nb2/sizeof(float) + i3*args.nb3/sizeof(float);
+
+    for (int i0 = tpitg.x; i0 < args.ne0; i0 += ntg.x) {
+        float sum = 0.0f;
+        for (int k = 0; k < args.ne01; ++k) {
+            const float a = src0[i0 + k*args.nb01/sizeof(float) + i02*args.nb02/sizeof(float) + i03*args.nb03/sizeof(float)];
+            const float b = src1[i1*args.nb10/sizeof(float) + k*args.nb11/sizeof(float) + i2*args.nb12/sizeof(float) + i3*args.nb13/sizeof(float)];
+            sum += a * b;
+        }
+        dst_ptr[i0] = sum;
+    }
+}

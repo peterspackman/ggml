@@ -1172,6 +1172,12 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
         case GGML_OP_MUL_MAT:
         case GGML_OP_MUL_MAT_ID:
             return has_simdgroup_reduction && op->src[0]->type != GGML_TYPE_NVFP4;
+        case GGML_OP_OUT_PROD:
+            return ggml_is_contiguous(op->src[0]) &&
+                   ggml_is_contiguous(op)         &&
+                   op->src[0]->type == GGML_TYPE_F32 &&
+                   op->src[1]->type == GGML_TYPE_F32 &&
+                   op->type         == GGML_TYPE_F32;
         case GGML_OP_SET:
         case GGML_OP_CPY:
         case GGML_OP_DUP:
