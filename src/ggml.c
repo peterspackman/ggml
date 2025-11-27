@@ -6328,13 +6328,15 @@ static void ggml_compute_backward(
             if (src0_needs_grads) {
                 GGML_ASSERT(grad->ne[2] == src1->ne[2]);
                 GGML_ASSERT(grad->ne[3] == src1->ne[3]);
-                // Ensure inputs are contiguous for out_prod (required by cuBLAS/rocBLAS)
-                struct ggml_tensor * src1_cont = ggml_is_contiguous(src1) ? src1 : ggml_cont(ctx, src1);
-                struct ggml_tensor * grad_cont = ggml_is_contiguous(grad) ? grad : ggml_cont(ctx, grad);
+                // ds0 = out_prod(src1, grad) = mul_mat(transpose(src1), transpose(grad))
+                // out_prod contracts on dim1, mul_mat contracts on dim0
+                // transpose both inputs so that mul_mat contracts on what was dim1
+                struct ggml_tensor * src1_t = ggml_cont(ctx, ggml_transpose(ctx, src1));
+                struct ggml_tensor * grad_t = ggml_cont(ctx, ggml_transpose(ctx, grad));
                 struct ggml_tensor * tmp =
-                    ggml_out_prod(ctx, // [n,m,qq,rr]
-                        src1_cont,     // [n,p,qq,rr]
-                        grad_cont);    // [m,p,qq,rr]
+                    ggml_mul_mat(ctx, // [n,m,qq,rr]
+                        src1_t,       // [p,n,qq,rr]
+                        grad_t);      // [p,m,qq,rr]
                 if (!ggml_are_same_shape(tmp, src0)) {
                     GGML_ASSERT(tmp->ne[0] == src0->ne[0]);
                     GGML_ASSERT(tmp->ne[1] == src0->ne[1]);
@@ -6350,14 +6352,16 @@ static void ggml_compute_backward(
                 ggml_add_or_set(ctx, cgraph, isrc0, tmp);
             }
             if (src1_needs_grads) {
-                // Ensure inputs are contiguous for out_prod (required by cuBLAS/rocBLAS)
-                // Note: ggml_transpose creates a non-contiguous view, so wrap with ggml_cont
-                struct ggml_tensor * src0_cont = ggml_is_contiguous(src0) ? src0 : ggml_cont(ctx, src0);
-                struct ggml_tensor * grad_transposed = ggml_cont(ctx, ggml_transpose(ctx, grad));
+                // ds1 = out_prod(src0, transpose(grad)) = mul_mat(transpose(src0), grad)
+                // out_prod(A, B) = mul_mat(transpose(A), transpose(B))
+                // So out_prod(src0, transpose(grad)) = mul_mat(transpose(src0), transpose(transpose(grad)))
+                //                                    = mul_mat(transpose(src0), grad)
+                struct ggml_tensor * src0_t = ggml_cont(ctx, ggml_transpose(ctx, src0));
+                struct ggml_tensor * grad_cont = ggml_is_contiguous(grad) ? grad : ggml_cont(ctx, grad);
                 ggml_add_or_set(ctx, cgraph, isrc1,
-                        ggml_out_prod(ctx,      // [n,p,qq,rr]
-                            src0_cont,          // [n,m,q1,r1]
-                            grad_transposed));  // [p,m,qq,rr]
+                        ggml_mul_mat(ctx,   // [n,p,qq,rr]
+                            src0_t,         // [m,n,q1,r1]
+                            grad_cont));    // [m,p,qq,rr]
             }
         } break;
         case GGML_OP_SCALE: {
