@@ -1265,6 +1265,52 @@ kernel void kernel_clamp_f32_4(
     dst[tpig] = clamp(src0[tpig], args.min, args.max);
 }
 
+// Outer product kernel
+// dst[i0,i1,i2,i3] = sum_{k} src0[i0,k,i02,i03] * src1[i1,k,i2,i3]
+// where i02 = i2 / (ne2/ne02), i03 = i3 / (ne3/ne03) for broadcasting
+kernel void kernel_out_prod_f32(
+        constant ggml_metal_kargs_out_prod & args,
+        device const float * src0,
+        device const float * src1,
+        device       float * dst,
+        uint3   tgpig[[threadgroup_position_in_grid]],
+        ushort3 tpitg[[thread_position_in_threadgroup]],
+        ushort3   ntg[[threads_per_threadgroup]]) {
+    // Thread block handles a subset of the output
+    const int i3 = tgpig.z;
+    const int i2 = tgpig.y;
+    const int i1 = tgpig.x;
+
+    // Broadcasting indices for src0
+    const int dps2 = args.ne2 / args.ne02; // dst per src0 in dim 2
+    const int dps3 = args.ne3 / args.ne03; // dst per src0 in dim 3
+    const int i02 = i2 / dps2;
+    const int i03 = i3 / dps3;
+
+    // Pointers to the relevant slices
+    // src0: [ne00, ne01, ne02, ne03] - row i0 at position i02, i03
+    // src1: [ne10, ne11, ne12, ne13] - row i1 at position i2, i3 (ne11 == ne01)
+    // dst:  [ne0,  ne1,  ne2,  ne3 ] - output row at i1, i2, i3
+
+    device float * dst_ptr = dst + i1*args.nb1/sizeof(float) + i2*args.nb2/sizeof(float) + i3*args.nb3/sizeof(float);
+
+    // Each thread handles multiple elements along i0 dimension
+    for (int i0 = tpitg.x; i0 < args.ne0; i0 += ntg.x) {
+        float sum = 0.0f;
+
+        // Sum over k (the contracting dimension ne01 == ne11)
+        for (int k = 0; k < args.ne01; ++k) {
+            // src0[i0, k, i02, i03]
+            const float a = src0[i0 + k*args.nb01/sizeof(float) + i02*args.nb02/sizeof(float) + i03*args.nb03/sizeof(float)];
+            // src1[i1, k, i2, i3]
+            const float b = src1[i1*args.nb10/sizeof(float) + k*args.nb11/sizeof(float) + i2*args.nb12/sizeof(float) + i3*args.nb13/sizeof(float)];
+            sum += a * b;
+        }
+
+        dst_ptr[i0] = sum;
+    }
+}
+
 kernel void kernel_relu_f32(
         device const float * src0,
         device       float * dst,
