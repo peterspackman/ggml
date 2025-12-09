@@ -248,6 +248,41 @@ typedef struct {
     uint64_t nb3;
 } ggml_metal_kargs_repeat;
 
+// repeat_back: sum contributions from repeated tensor back to original shape
+// dst has shape [ne0, ne1, ne2, ne3] (smaller)
+// src0 has shape [ne00, ne01, ne02, ne03] (larger)
+// repeat counts: nr0 = ne00/ne0, etc.
+typedef struct {
+    int32_t  ne00;    // src shape
+    int32_t  ne01;
+    int32_t  ne02;
+    int32_t  ne03;
+    uint64_t nb00;    // src strides
+    uint64_t nb01;
+    uint64_t nb02;
+    uint64_t nb03;
+    int32_t  ne0;     // dst shape
+    int32_t  ne1;
+    int32_t  ne2;
+    int32_t  ne3;
+    uint64_t nb0;     // dst strides
+    uint64_t nb1;
+    uint64_t nb2;
+    uint64_t nb3;
+} ggml_metal_kargs_repeat_back;
+
+// get_rows_back: scatter-add gradient rows back to original positions
+// src0: gradient tensor [nc, nr] where nr is number of selected rows
+// src1: indices tensor [nr] (I32) - which rows in dst each src0 row came from
+// dst: output gradient [nc, n_dst_rows] - accumulated gradients
+typedef struct {
+    int32_t  nc;          // number of columns (row length)
+    int32_t  nr;          // number of rows in src0 (number of indices)
+    int32_t  n_dst_rows;  // number of rows in dst
+    uint64_t nb01;        // src0 row stride in bytes
+    uint64_t nb1;         // dst row stride in bytes
+} ggml_metal_kargs_get_rows_back;
+
 typedef struct {
     int64_t  nk0;
     int64_t  ne00;

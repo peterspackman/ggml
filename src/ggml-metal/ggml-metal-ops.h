@@ -45,13 +45,16 @@ size_t ggml_metal_op_flash_attn_ext_extra_tmp(const struct ggml_tensor * op);
 
 int ggml_metal_op_concat            (ggml_metal_op_t ctx, int idx);
 int ggml_metal_op_repeat            (ggml_metal_op_t ctx, int idx);
+int ggml_metal_op_repeat_back       (ggml_metal_op_t ctx, int idx);
 int ggml_metal_op_acc               (ggml_metal_op_t ctx, int idx);
+int ggml_metal_op_add1              (ggml_metal_op_t ctx, int idx);
 int ggml_metal_op_unary             (ggml_metal_op_t ctx, int idx);
 int ggml_metal_op_glu               (ggml_metal_op_t ctx, int idx);
 int ggml_metal_op_sum               (ggml_metal_op_t ctx, int idx);
 int ggml_metal_op_sum_rows          (ggml_metal_op_t ctx, int idx);
 int ggml_metal_op_cumsum            (ggml_metal_op_t ctx, int idx);
 int ggml_metal_op_get_rows          (ggml_metal_op_t ctx, int idx);
+int ggml_metal_op_get_rows_back     (ggml_metal_op_t ctx, int idx);
 int ggml_metal_op_set_rows          (ggml_metal_op_t ctx, int idx);
 int ggml_metal_op_diag              (ggml_metal_op_t ctx, int idx);
 int ggml_metal_op_soft_max          (ggml_metal_op_t ctx, int idx);
@@ -91,6 +94,14 @@ int ggml_metal_op_tri               (ggml_metal_op_t ctx, int idx);
 int ggml_metal_op_opt_step_adamw    (ggml_metal_op_t ctx, int idx);
 int ggml_metal_op_opt_step_sgd      (ggml_metal_op_t ctx, int idx);
 int ggml_metal_op_count_equal       (ggml_metal_op_t ctx, int idx);
+
+// MACE symmetric contraction ops
+int ggml_metal_op_symm_contract_1      (ggml_metal_op_t ctx, int idx);
+int ggml_metal_op_symm_contract_1_back (ggml_metal_op_t ctx, int idx);
+int ggml_metal_op_symm_contract_2      (ggml_metal_op_t ctx, int idx);
+int ggml_metal_op_symm_contract_2_back (ggml_metal_op_t ctx, int idx);
+int ggml_metal_op_symm_contract_3      (ggml_metal_op_t ctx, int idx);
+int ggml_metal_op_symm_contract_3_back (ggml_metal_op_t ctx, int idx);
 
 #ifdef __cplusplus
 }

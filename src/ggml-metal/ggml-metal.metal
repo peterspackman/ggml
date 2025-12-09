@@ -10580,3 +10580,93 @@ kernel void kernel_out_prod_f32(
         dst_ptr[i0] = sum;
     }
 }
+
+// repeat_back: sum contributions from repeated tensor back to original shape
+kernel void kernel_repeat_back_f32(
+        constant ggml_metal_kargs_repeat_back & args,
+        device const float * src0,
+        device       float * dst,
+        uint3   tgpig[[threadgroup_position_in_grid]],
+        ushort3 tpitg[[thread_position_in_threadgroup]],
+        ushort3   ntg[[threads_per_threadgroup]]) {
+    const int k3 = tgpig.z;
+    const int k2 = tgpig.y;
+    const int k1 = tgpig.x;
+
+    const int nr0 = args.ne00 / args.ne0;
+    const int nr1 = args.ne01 / args.ne1;
+    const int nr2 = args.ne02 / args.ne2;
+    const int nr3 = args.ne03 / args.ne3;
+
+    for (int k0 = tpitg.x; k0 < args.ne0; k0 += ntg.x) {
+        float sum = 0.0f;
+
+        for (int i3 = 0; i3 < nr3; i3++) {
+            for (int i2 = 0; i2 < nr2; i2++) {
+                for (int i1 = 0; i1 < nr1; i1++) {
+                    for (int i0 = 0; i0 < nr0; i0++) {
+                        const int src_idx = (i3*args.ne3 + k3) * (args.nb03/sizeof(float)) +
+                                           (i2*args.ne2 + k2) * (args.nb02/sizeof(float)) +
+                                           (i1*args.ne1 + k1) * (args.nb01/sizeof(float)) +
+                                           (i0*args.ne0 + k0) * (args.nb00/sizeof(float));
+                        sum += src0[src_idx];
+                    }
+                }
+            }
+        }
+
+        const int dst_idx = k3 * (args.nb3/sizeof(float)) +
+                           k2 * (args.nb2/sizeof(float)) +
+                           k1 * (args.nb1/sizeof(float)) +
+                           k0 * (args.nb0/sizeof(float));
+        dst[dst_idx] = sum;
+    }
+}
+
+// Simple zero-fill kernel for initializing buffers before scatter operations
+kernel void kernel_zero_f32(
+        device float * dst [[buffer(0)]],
+        constant int64_t & n_elements [[buffer(1)]],
+        uint tpig[[thread_position_in_grid]]) {
+    if ((int64_t)tpig < n_elements) {
+        dst[tpig] = 0.0f;
+    }
+}
+
+// get_rows_back: scatter-add gradient rows back to original positions
+kernel void kernel_get_rows_back_f32(
+        constant ggml_metal_kargs_get_rows_back & args,
+        device const float   * src0,
+        device const int32_t * indices,
+        device       float   * dst,
+        uint tpig[[thread_position_in_grid]]) {
+
+    const int nc = args.nc;
+    const int nr = args.nr;
+
+    const int col = tpig % nc;
+    const int src_row = tpig / nc;
+
+    if (src_row >= nr) return;
+
+    const int dst_row = indices[src_row];
+
+    if (dst_row < 0 || dst_row >= args.n_dst_rows) return;
+
+    const float val = src0[col + src_row * (args.nb01 / sizeof(float))];
+
+    device atomic_float * dst_ptr = (device atomic_float *)&dst[col + dst_row * (args.nb1 / sizeof(float))];
+    atomic_fetch_add_explicit(dst_ptr, val, memory_order_relaxed);
+}
+
+// ADD1: dst = src0 + scalar (where scalar is a single-element tensor)
+kernel void kernel_add1_f32(
+        device const float * src0,
+        device const float * src1,
+        device       float * dst,
+        constant   int64_t & n,
+        uint tpig[[thread_position_in_grid]]) {
+    if (tpig < uint(n)) {
+        dst[tpig] = src0[tpig] + src1[0];
+    }
+}

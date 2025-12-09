@@ -211,6 +211,45 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_repeat(ggml_meta
     return res;
 }
 
+ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_repeat_back(ggml_metal_library_t lib) {
+    const char * name = "kernel_repeat_back_f32";
+
+    ggml_metal_pipeline_with_params res = ggml_metal_library_get_pipeline(lib, name);
+    if (res.pipeline) {
+        return res;
+    }
+
+    res = ggml_metal_library_compile_pipeline(lib, name, name, nullptr);
+
+    return res;
+}
+
+ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_get_rows_back(ggml_metal_library_t lib) {
+    const char * name = "kernel_get_rows_back_f32";
+
+    ggml_metal_pipeline_with_params res = ggml_metal_library_get_pipeline(lib, name);
+    if (res.pipeline) {
+        return res;
+    }
+
+    res = ggml_metal_library_compile_pipeline(lib, name, name, nullptr);
+
+    return res;
+}
+
+ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_zero_f32(ggml_metal_library_t lib) {
+    const char * name = "kernel_zero_f32";
+
+    ggml_metal_pipeline_with_params res = ggml_metal_library_get_pipeline(lib, name);
+    if (res.pipeline) {
+        return res;
+    }
+
+    res = ggml_metal_library_compile_pipeline(lib, name, name, nullptr);
+
+    return res;
+}
+
 ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_unary(ggml_metal_library_t lib, const ggml_tensor * op) {
     char base[256];
     char name[256];
@@ -1979,7 +2018,7 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_count_equal(ggml
     return res;
 }
 
-ggml_metal_pipeline_t ggml_metal_library_get_pipeline_out_prod(ggml_metal_library_t lib, const ggml_tensor * op) {
+ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_out_prod(ggml_metal_library_t lib, const ggml_tensor * op) {
     assert(op->op == GGML_OP_OUT_PROD);
 
     char base[256];
@@ -1988,8 +2027,8 @@ ggml_metal_pipeline_t ggml_metal_library_get_pipeline_out_prod(ggml_metal_librar
     snprintf(base, 256, "kernel_out_prod_f32");
     snprintf(name, 256, "%s", base);
 
-    ggml_metal_pipeline_t res = ggml_metal_library_get_pipeline(lib, name);
-    if (res) {
+    ggml_metal_pipeline_with_params res = ggml_metal_library_get_pipeline(lib, name);
+    if (res.pipeline) {
         return res;
     }
 

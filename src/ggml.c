@@ -6471,7 +6471,8 @@ static void ggml_compute_backward(
         } break;
         case GGML_OP_MEAN: {
             if (src0_needs_grads) {
-                ggml_add1_or_set(ctx, cgraph, isrc0, ggml_scale_impl(ctx, grad, 1.0f/src0->ne[0], 0.0, false));
+                struct ggml_tensor * grad_cont = ggml_is_contiguous(grad) ? grad : ggml_cont(ctx, grad);
+                ggml_add1_or_set(ctx, cgraph, isrc0, ggml_scale_impl(ctx, grad_cont, 1.0f/src0->ne[0], 0.0, false));
             }
         } break;
         case GGML_OP_REPEAT: {
@@ -6550,7 +6551,8 @@ static void ggml_compute_backward(
             if (src0_needs_grads) {
                 float s;
                 memcpy(&s, tensor->op_params, sizeof(float));
-                ggml_add_or_set(ctx, cgraph, isrc0, ggml_scale_impl(ctx, grad, s, 0.0, false));
+                struct ggml_tensor * grad_cont = ggml_is_contiguous(grad) ? grad : ggml_cont(ctx, grad);
+                ggml_add_or_set(ctx, cgraph, isrc0, ggml_scale_impl(ctx, grad_cont, s, 0.0, false));
             }
         } break;
         case GGML_OP_CLAMP: {
@@ -6620,10 +6622,10 @@ static void ggml_compute_backward(
             // same as cpy
             if (src0_needs_grads) {
                 GGML_ASSERT(!cgraph->grads[isrc0] || ggml_is_contiguous(cgraph->grads[isrc0]));
-                GGML_ASSERT(ggml_is_contiguous(grad));
+                struct ggml_tensor * grad_cont = ggml_is_contiguous(grad) ? grad : ggml_cont(ctx, grad);
                 GGML_ASSERT(ggml_nelements(tensor) == ggml_nelements(src0));
                 ggml_add_or_set(ctx, cgraph, isrc0,
-                    ggml_are_same_shape(tensor, src0) ? grad : ggml_reshape(ctx, grad, src0));
+                    ggml_are_same_shape(tensor, src0) ? grad_cont : ggml_reshape(ctx, grad_cont, src0));
             }
         } break;
         case GGML_OP_RESHAPE: {
@@ -6671,12 +6673,12 @@ static void ggml_compute_backward(
                 axb[axis1] = 1;
                 axb[axis2] = 2;
                 axb[axis3] = 3;
-                ggml_add_or_set(ctx, cgraph, isrc0, ggml_permute(ctx, grad, axb[0], axb[1], axb[2], axb[3]));
+                ggml_add_or_set(ctx, cgraph, isrc0, ggml_cont(ctx, ggml_permute(ctx, grad, axb[0], axb[1], axb[2], axb[3])));
             }
         } break;
         case GGML_OP_TRANSPOSE: {
             if (src0_needs_grads) {
-                ggml_add_or_set(ctx, cgraph, isrc0, ggml_transpose(ctx, grad));
+                ggml_add_or_set(ctx, cgraph, isrc0, ggml_cont(ctx, ggml_transpose(ctx, grad)));
             }
         } break;
         case GGML_OP_GET_ROWS: {
