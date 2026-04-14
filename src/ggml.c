@@ -6813,6 +6813,22 @@ static void ggml_compute_backward(
                         ggml_add_or_set(ctx, cgraph, isrc0, ggml_mul(ctx, grad, ggml_sigmoid(ctx, src0)));
                     }
                 } break;
+                case GGML_UNARY_OP_SIGMOID: {
+                    if (src0_needs_grads) {
+                        // d/dx sigmoid(x) = y * (1 - y), where y = tensor (forward output)
+                        struct ggml_tensor * one_minus_y = ggml_scale_impl(ctx, tensor, -1.0f, 1.0f, false);
+                        ggml_add_or_set(ctx, cgraph, isrc0,
+                            ggml_mul(ctx, grad, ggml_mul(ctx, tensor, one_minus_y)));
+                    }
+                } break;
+                case GGML_UNARY_OP_TANH: {
+                    if (src0_needs_grads) {
+                        // d/dx tanh(x) = 1 - tanh(x)^2 = 1 - y^2
+                        struct ggml_tensor * y_sq = ggml_mul(ctx, tensor, tensor);
+                        struct ggml_tensor * one_minus_y_sq = ggml_scale_impl(ctx, y_sq, -1.0f, 1.0f, false);
+                        ggml_add_or_set(ctx, cgraph, isrc0, ggml_mul(ctx, grad, one_minus_y_sq));
+                    }
+                } break;
                 default: {
                     fprintf(stderr, "%s: unsupported unary op for backward pass: %s\n",
                         __func__, ggml_unary_op_name(ggml_get_unary_op(tensor)));
