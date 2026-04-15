@@ -1,13 +1,13 @@
 #ifdef INPLACE
-fn update(src_offset: u32, dst_offset: u32, scale: f32) {
-    src[dst_offset] = scale * src[src_offset];
+fn update(src_offset: u32, dst_offset: u32, scale: f32, bias: f32) {
+    src[dst_offset] = scale * src[src_offset] + bias;
 }
 
 @group(0) @binding(1)
 var<uniform> params: Params;
 #else
-fn update(src_offset: u32, dst_offset: u32, scale: f32) {
-    dst[dst_offset] = scale * src[src_offset];
+fn update(src_offset: u32, dst_offset: u32, scale: f32, bias: f32) {
+    dst[dst_offset] = scale * src[src_offset] + bias;
 }
 
 @group(0) @binding(1)
@@ -43,6 +43,9 @@ struct Params {
 var<storage, read_write> src: array<f32>;
 
 var<workgroup> scratch: array<f32, WG_SIZE>;
+#ifdef NORM
+var<workgroup> scratch_sum: array<f32, WG_SIZE>;
+#endif
 
 @compute @workgroup_size(WG_SIZE)
 fn main(@builtin(workgroup_id) wid: vec3<u32>,
@@ -59,32 +62,55 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>,
 
     let elems = (params.ne0 + WG_SIZE - 1) / WG_SIZE;
 
+    var sum_sq = 0.0f;
+#ifdef NORM
     var sum = 0.0f;
+#endif
     var col = lid.x;
     for (var j: u32 = 0; j < elems; j++) {
         if (col >= params.ne0) {
             break;
         }
-        sum += pow(src[i_src_row + col], 2.0);
+        let v = src[i_src_row + col];
+        sum_sq += v * v;
+#ifdef NORM
+        sum += v;
+#endif
         col += WG_SIZE;
     }
 
-    scratch[lid.x] = sum;
+    scratch[lid.x] = sum_sq;
+#ifdef NORM
+    scratch_sum[lid.x] = sum;
+#endif
     workgroupBarrier();
-    var offset: u32 = WG_SIZE / 2;
-    while (offset > 0) {
-        if (lid.x < offset) {
-            scratch[lid.x] += scratch[lid.x + offset];
+    var red_off: u32 = WG_SIZE / 2;
+    while (red_off > 0) {
+        if (lid.x < red_off) {
+            scratch[lid.x] += scratch[lid.x + red_off];
+#ifdef NORM
+            scratch_sum[lid.x] += scratch_sum[lid.x + red_off];
+#endif
         }
-        offset = offset / 2;
+        red_off = red_off / 2;
         workgroupBarrier();
     }
-    sum = scratch[0];
+    sum_sq = scratch[0];
+#ifdef NORM
+    sum = scratch_sum[0];
+#endif
 
 #ifdef RMS_NORM
-    let scale = 1.0/sqrt(sum/f32(params.ne0) + params.eps);
+    let scale = 1.0/sqrt(sum_sq/f32(params.ne0) + params.eps);
+    let bias  = 0.0;
 #elif defined(L2_NORM)
-    let scale = 1.0/max(sqrt(sum), params.eps);
+    let scale = 1.0/max(sqrt(sum_sq), params.eps);
+    let bias  = 0.0;
+#elif defined(NORM)
+    let mean  = sum / f32(params.ne0);
+    let var_  = sum_sq / f32(params.ne0) - mean * mean;
+    let scale = 1.0/sqrt(var_ + params.eps);
+    let bias  = -mean * scale;
 #endif
 
     col = lid.x;
@@ -92,7 +118,7 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>,
         if (col >= params.ne0) {
             break;
         }
-        update(i_src_row + col, i_dst_row + col, scale);
+        update(i_src_row + col, i_dst_row + col, scale, bias);
         col += WG_SIZE;
     }
 }

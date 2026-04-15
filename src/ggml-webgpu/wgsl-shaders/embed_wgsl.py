@@ -75,6 +75,9 @@ def main():
         out.write("// Auto-generated shader embedding\n")
         out.write("#include <string>\n\n")
         for fname in sorted(os.listdir(args.input_dir)):
+            # Skip AOT template sources; .wgsl files are JIT-preprocessed at runtime
+            if fname.endswith(".tmpl.wgsl") or fname.endswith(".tmpl"):
+                continue
             if fname.endswith(".wgsl"):
                 shader_path = os.path.join(args.input_dir, fname)
                 shader_name = fname.replace(".wgsl", "")

@@ -800,6 +800,9 @@ class ggml_webgpu_shader_lib {
         concat_pipelines;           // type
     std::unordered_map<ggml_webgpu_repeat_pipeline_key, webgpu_pipeline, ggml_webgpu_repeat_pipeline_key_hash>
         repeat_pipelines;           // type
+    std::unordered_map<int, webgpu_pipeline> out_prod_pipelines;        // f32 only, no variants
+    std::unordered_map<int, webgpu_pipeline> repeat_back_pipelines;     // f32 only, no variants
+    std::unordered_map<int, webgpu_pipeline> get_rows_back_pipelines;   // f32 only, no variants
     std::unordered_map<ggml_webgpu_flash_attn_pipeline_key, webgpu_pipeline, ggml_webgpu_flash_attn_pipeline_key_hash>
         flash_attn_pipelines;
     std::unordered_map<ggml_webgpu_flash_attn_vec_reduce_pipeline_key,
@@ -869,6 +872,10 @@ class ggml_webgpu_shader_lib {
             case GGML_OP_L2_NORM:
                 defines.push_back("L2_NORM");
                 variant = "l2_norm";
+                break;
+            case GGML_OP_NORM:
+                defines.push_back("NORM");
+                variant = "norm";
                 break;
             default:
                 GGML_ABORT("Unsupported op for row_norm shader");
@@ -1934,6 +1941,55 @@ class ggml_webgpu_shader_lib {
         pipeline.context         = decisions;
         repeat_pipelines[key]    = pipeline;
         return repeat_pipelines[key];
+    }
+
+    webgpu_pipeline get_out_prod_pipeline(const ggml_webgpu_shader_lib_context & context) {
+        auto it = out_prod_pipelines.find(0);
+        if (it != out_prod_pipelines.end()) {
+            return it->second;
+        }
+        const uint32_t out_prod_wg_size = 64u;
+        uint32_t       wg_size          = std::min(context.max_wg_size, out_prod_wg_size);
+        std::vector<std::string> defines = { std::string("WG_SIZE=") + std::to_string(wg_size) };
+        auto processed           = preprocessor.preprocess(wgsl_out_prod, defines);
+        auto decisions           = std::make_shared<ggml_webgpu_generic_shader_decisions>();
+        decisions->wg_size       = wg_size;
+        webgpu_pipeline pipeline = ggml_webgpu_create_pipeline(device, processed, "out_prod_f32");
+        pipeline.context         = decisions;
+        out_prod_pipelines[0]    = pipeline;
+        return out_prod_pipelines[0];
+    }
+
+    webgpu_pipeline get_repeat_back_pipeline(const ggml_webgpu_shader_lib_context & context) {
+        auto it = repeat_back_pipelines.find(0);
+        if (it != repeat_back_pipelines.end()) {
+            return it->second;
+        }
+        const uint32_t wg = std::min(context.max_wg_size, 64u);
+        std::vector<std::string> defines = { std::string("WG_SIZE=") + std::to_string(wg) };
+        auto processed             = preprocessor.preprocess(wgsl_repeat_back, defines);
+        auto decisions             = std::make_shared<ggml_webgpu_generic_shader_decisions>();
+        decisions->wg_size         = wg;
+        webgpu_pipeline pipeline   = ggml_webgpu_create_pipeline(device, processed, "repeat_back_f32");
+        pipeline.context           = decisions;
+        repeat_back_pipelines[0]   = pipeline;
+        return repeat_back_pipelines[0];
+    }
+
+    webgpu_pipeline get_get_rows_back_pipeline(const ggml_webgpu_shader_lib_context & context) {
+        auto it = get_rows_back_pipelines.find(0);
+        if (it != get_rows_back_pipelines.end()) {
+            return it->second;
+        }
+        const uint32_t wg = std::min(context.max_wg_size, 64u);
+        std::vector<std::string> defines = { std::string("WG_SIZE=") + std::to_string(wg) };
+        auto processed              = preprocessor.preprocess(wgsl_get_rows_back, defines);
+        auto decisions              = std::make_shared<ggml_webgpu_generic_shader_decisions>();
+        decisions->wg_size          = wg;
+        webgpu_pipeline pipeline    = ggml_webgpu_create_pipeline(device, processed, "get_rows_back_f32");
+        pipeline.context            = decisions;
+        get_rows_back_pipelines[0]  = pipeline;
+        return get_rows_back_pipelines[0];
     }
 
     webgpu_pipeline get_flash_attn_pipeline(const ggml_webgpu_flash_attn_shader_lib_context & context) {
