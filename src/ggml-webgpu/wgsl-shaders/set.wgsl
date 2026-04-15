@@ -80,7 +80,9 @@ fn src1_idx_from_coords(coords: vec4<u32>) -> u32 {
 }
 
 fn in_set_view(rel: u32, coords: vec4<u32>) -> bool {
-    return view_rel_from_coords(coords) == rel;
+    return view_rel_from_coords(coords) == rel &&
+           coords.x < params.src1_ne0 && coords.y < params.src1_ne1 &&
+           coords.z < params.src1_ne2 && coords.w < params.src1_ne3;
 }
 
 @compute @workgroup_size(WG_SIZE)
@@ -95,13 +97,21 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let src1_idx = params.offset_src1 + src1_idx_from_coords(coords);
     let dst_idx = params.offset_view + view_rel_from_coords(coords);
 
+#ifdef ACC_OP
+    dst[dst_idx] = dst[dst_idx] + src1[src1_idx];
+#else
     dst[dst_idx] = src1[src1_idx];
+#endif
 #else
     let rel = select(params.ne, gid.x - params.offset_view, gid.x >= params.offset_view);
     let coords = decode_view_coords(rel);
 
     if (rel < params.stride_dst13 * params.src1_ne3 && in_set_view(rel, coords)) {
+#ifdef ACC_OP
+        dst[gid.x] = src0[params.offset_src0 + gid.x] + src1[params.offset_src1 + src1_idx_from_coords(coords)];
+#else
         dst[gid.x] = src1[params.offset_src1 + src1_idx_from_coords(coords)];
+#endif
     } else {
         dst[gid.x] = src0[params.offset_src0 + gid.x];
     }

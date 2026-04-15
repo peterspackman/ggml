@@ -2357,6 +2357,55 @@ static webgpu_encoded_op ggml_webgpu_get_rows_back(webgpu_context &       ctx,
     return ggml_backend_webgpu_build(ctx->global_ctx, ctx->param_arena, encoder, pipeline, params, entries, wg_x);
 }
 
+static webgpu_encoded_op ggml_webgpu_rms_norm_back(webgpu_context &       ctx,
+                                                   wgpu::CommandEncoder & encoder,
+                                                   ggml_tensor *          src0,
+                                                   ggml_tensor *          src1,
+                                                   ggml_tensor *          dst) {
+    const size_t ts = ggml_type_size(GGML_TYPE_F32);
+    const uint32_t nc     = (uint32_t) src0->ne[0];
+    const uint32_t n_rows = (uint32_t) (src0->ne[1] * src0->ne[2] * src0->ne[3]);
+    float eps = 0.0f;
+    memcpy(&eps, dst->op_params, sizeof(float));
+
+    std::vector<uint32_t> params = {
+        nc,
+        n_rows,
+        (uint32_t) (ggml_webgpu_tensor_misalignment(ctx, src0) / ts),
+        (uint32_t) (ggml_webgpu_tensor_misalignment(ctx, src1) / ts),
+        (uint32_t) (ggml_webgpu_tensor_misalignment(ctx, dst)  / ts),
+        (uint32_t) (src0->nb[1] / ts),
+        (uint32_t) (src1->nb[1] / ts),
+        (uint32_t) (dst->nb[1]  / ts),
+        *(uint32_t *) &eps,
+    };
+
+    std::vector<wgpu::BindGroupEntry> entries = {
+        { .binding = 0,
+         .buffer  = ggml_webgpu_tensor_buf(src0),
+         .offset  = ggml_webgpu_tensor_align_offset(ctx, src0),
+         .size    = ggml_webgpu_tensor_binding_size(ctx, src0) },
+        { .binding = 1,
+         .buffer  = ggml_webgpu_tensor_buf(src1),
+         .offset  = ggml_webgpu_tensor_align_offset(ctx, src1),
+         .size    = ggml_webgpu_tensor_binding_size(ctx, src1) },
+        { .binding = 2,
+         .buffer  = ggml_webgpu_tensor_buf(dst),
+         .offset  = ggml_webgpu_tensor_align_offset(ctx, dst),
+         .size    = ggml_webgpu_tensor_binding_size(ctx, dst)  }
+    };
+
+    ggml_webgpu_shader_lib_context shader_lib_ctx = {
+        .src0        = src0,
+        .src1        = src1,
+        .dst         = dst,
+        .max_wg_size = ctx->global_ctx->capabilities.limits.maxComputeInvocationsPerWorkgroup,
+    };
+
+    webgpu_pipeline pipeline = ctx->shader_lib->get_rms_norm_back_pipeline(shader_lib_ctx);
+    return ggml_backend_webgpu_build(ctx->global_ctx, ctx->param_arena, encoder, pipeline, params, entries, n_rows);
+}
+
 static webgpu_encoded_op ggml_webgpu_silu_back(webgpu_context &       ctx,
                                                wgpu::CommandEncoder & encoder,
                                                ggml_tensor *          src0,
@@ -3137,6 +3186,7 @@ static std::optional<webgpu_encoded_op> ggml_webgpu_encode_node(webgpu_context  
         case GGML_OP_CONT:
             return ggml_webgpu_cpy(ctx, encoder, src0, node);
         case GGML_OP_SET:
+        case GGML_OP_ACC:
             return ggml_webgpu_set(ctx, encoder, src0, src1, node);
         case GGML_OP_SET_ROWS:
             return ggml_webgpu_set_rows(ctx, encoder, src0, src1, node);
@@ -3171,6 +3221,8 @@ static std::optional<webgpu_encoded_op> ggml_webgpu_encode_node(webgpu_context  
             return ggml_webgpu_silu_back(ctx, encoder, src0, src1, node);
         case GGML_OP_SOFT_MAX_BACK:
             return ggml_webgpu_soft_max_back(ctx, encoder, src0, src1, node);
+        case GGML_OP_RMS_NORM_BACK:
+            return ggml_webgpu_rms_norm_back(ctx, encoder, src0, src1, node);
         case GGML_OP_NORM:
         case GGML_OP_RMS_NORM:
         case GGML_OP_L2_NORM:
@@ -3749,6 +3801,14 @@ static bool create_webgpu_device(ggml_backend_webgpu_reg_context * ctx) {
         }
     }
     ctx->webgpu_global_ctx->capabilities.supports_subgroup_matrix = valid_subgroup_matrix_config;
+    // Allow disabling the subgroup-matrix path for precision-sensitive workloads.
+    // The subgroup-matrix mul_mat accumulates in f16 and can lose ~1% per matmul,
+    // which compounds badly through deep networks (especially in backward passes).
+    if (const char * env = std::getenv("GGML_WEBGPU_DISABLE_SUBGROUP_MATRIX")) {
+        if (env[0] != '\0' && env[0] != '0') {
+            ctx->webgpu_global_ctx->capabilities.supports_subgroup_matrix = false;
+        }
+    }
 #endif
 
     // For subgroup matrix code to be the most efficient, we would like the subgroup size to be consistent and accurate.
@@ -4001,6 +4061,10 @@ static bool ggml_backend_webgpu_device_supports_op(ggml_backend_dev_t dev, const
                           src1->type == GGML_TYPE_F32 && max_bias == 0.0f;
             break;
         }
+        case GGML_OP_RMS_NORM_BACK:
+            supports_op = op->type == GGML_TYPE_F32 && src0->type == GGML_TYPE_F32 &&
+                          src1->type == GGML_TYPE_F32;
+            break;
         case GGML_OP_CPY:
         case GGML_OP_CONT:
             supports_op = ((op->type == GGML_TYPE_F32 || op->type == GGML_TYPE_F16) &&
@@ -4009,6 +4073,7 @@ static bool ggml_backend_webgpu_device_supports_op(ggml_backend_dev_t dev, const
                            (src0->type == GGML_TYPE_F32 || src0->type == GGML_TYPE_I32));
             break;
         case GGML_OP_SET:
+        case GGML_OP_ACC:
             supports_op = src0->type == src1->type && src0->type == op->type &&
                           (op->type == GGML_TYPE_F32 || op->type == GGML_TYPE_I32);
             break;
