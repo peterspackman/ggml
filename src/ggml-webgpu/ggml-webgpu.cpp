@@ -2357,6 +2357,102 @@ static webgpu_encoded_op ggml_webgpu_get_rows_back(webgpu_context &       ctx,
     return ggml_backend_webgpu_build(ctx->global_ctx, ctx->param_arena, encoder, pipeline, params, entries, wg_x);
 }
 
+static webgpu_encoded_op ggml_webgpu_silu_back(webgpu_context &       ctx,
+                                               wgpu::CommandEncoder & encoder,
+                                               ggml_tensor *          src0,
+                                               ggml_tensor *          src1,
+                                               ggml_tensor *          dst) {
+    const size_t ts = ggml_type_size(GGML_TYPE_F32);
+    const uint32_t n = (uint32_t) ggml_nelements(dst);
+
+    std::vector<uint32_t> params = {
+        n,
+        (uint32_t) (ggml_webgpu_tensor_misalignment(ctx, src0) / ts),
+        (uint32_t) (ggml_webgpu_tensor_misalignment(ctx, src1) / ts),
+        (uint32_t) (ggml_webgpu_tensor_misalignment(ctx, dst)  / ts),
+    };
+
+    std::vector<wgpu::BindGroupEntry> entries = {
+        { .binding = 0,
+         .buffer  = ggml_webgpu_tensor_buf(src0),
+         .offset  = ggml_webgpu_tensor_align_offset(ctx, src0),
+         .size    = ggml_webgpu_tensor_binding_size(ctx, src0) },
+        { .binding = 1,
+         .buffer  = ggml_webgpu_tensor_buf(src1),
+         .offset  = ggml_webgpu_tensor_align_offset(ctx, src1),
+         .size    = ggml_webgpu_tensor_binding_size(ctx, src1) },
+        { .binding = 2,
+         .buffer  = ggml_webgpu_tensor_buf(dst),
+         .offset  = ggml_webgpu_tensor_align_offset(ctx, dst),
+         .size    = ggml_webgpu_tensor_binding_size(ctx, dst)  }
+    };
+
+    ggml_webgpu_shader_lib_context shader_lib_ctx = {
+        .src0        = src0,
+        .src1        = src1,
+        .dst         = dst,
+        .max_wg_size = ctx->global_ctx->capabilities.limits.maxComputeInvocationsPerWorkgroup,
+    };
+
+    webgpu_pipeline pipeline  = ctx->shader_lib->get_silu_back_pipeline(shader_lib_ctx);
+    auto *          decisions = static_cast<ggml_webgpu_generic_shader_decisions *>(pipeline.context.get());
+    uint32_t        wg_x      = CEIL_DIV(n, decisions->wg_size);
+    return ggml_backend_webgpu_build(ctx->global_ctx, ctx->param_arena, encoder, pipeline, params, entries, wg_x);
+}
+
+static webgpu_encoded_op ggml_webgpu_soft_max_back(webgpu_context &       ctx,
+                                                   wgpu::CommandEncoder & encoder,
+                                                   ggml_tensor *          src0,
+                                                   ggml_tensor *          src1,
+                                                   ggml_tensor *          dst) {
+    const size_t ts = ggml_type_size(GGML_TYPE_F32);
+    float scale    = 1.0f;
+    float max_bias = 0.0f;
+    memcpy(&scale,    (const float *) dst->op_params + 0, sizeof(float));
+    memcpy(&max_bias, (const float *) dst->op_params + 1, sizeof(float));
+    GGML_ASSERT(max_bias == 0.0f && "WebGPU SOFT_MAX_BACK: max_bias != 0 not supported");
+
+    const uint32_t nc     = (uint32_t) src0->ne[0];
+    const uint32_t n_rows = (uint32_t) (src0->ne[1] * src0->ne[2] * src0->ne[3]);
+
+    std::vector<uint32_t> params = {
+        nc,
+        n_rows,
+        (uint32_t) (ggml_webgpu_tensor_misalignment(ctx, src0) / ts),
+        (uint32_t) (ggml_webgpu_tensor_misalignment(ctx, src1) / ts),
+        (uint32_t) (ggml_webgpu_tensor_misalignment(ctx, dst)  / ts),
+        (uint32_t) (src0->nb[1] / ts),
+        (uint32_t) (src1->nb[1] / ts),
+        (uint32_t) (dst->nb[1]  / ts),
+        *(uint32_t *) &scale,
+    };
+
+    std::vector<wgpu::BindGroupEntry> entries = {
+        { .binding = 0,
+         .buffer  = ggml_webgpu_tensor_buf(src0),
+         .offset  = ggml_webgpu_tensor_align_offset(ctx, src0),
+         .size    = ggml_webgpu_tensor_binding_size(ctx, src0) },
+        { .binding = 1,
+         .buffer  = ggml_webgpu_tensor_buf(src1),
+         .offset  = ggml_webgpu_tensor_align_offset(ctx, src1),
+         .size    = ggml_webgpu_tensor_binding_size(ctx, src1) },
+        { .binding = 2,
+         .buffer  = ggml_webgpu_tensor_buf(dst),
+         .offset  = ggml_webgpu_tensor_align_offset(ctx, dst),
+         .size    = ggml_webgpu_tensor_binding_size(ctx, dst)  }
+    };
+
+    ggml_webgpu_shader_lib_context shader_lib_ctx = {
+        .src0        = src0,
+        .src1        = src1,
+        .dst         = dst,
+        .max_wg_size = ctx->global_ctx->capabilities.limits.maxComputeInvocationsPerWorkgroup,
+    };
+
+    webgpu_pipeline pipeline = ctx->shader_lib->get_soft_max_back_pipeline(shader_lib_ctx);
+    return ggml_backend_webgpu_build(ctx->global_ctx, ctx->param_arena, encoder, pipeline, params, entries, n_rows);
+}
+
 static webgpu_encoded_op ggml_webgpu_repeat(webgpu_context &       ctx,
                                             wgpu::CommandEncoder & encoder,
                                             ggml_tensor *          src0,
@@ -3071,6 +3167,10 @@ static std::optional<webgpu_encoded_op> ggml_webgpu_encode_node(webgpu_context  
             return ggml_webgpu_repeat_back(ctx, encoder, src0, node);
         case GGML_OP_GET_ROWS_BACK:
             return ggml_webgpu_get_rows_back(ctx, encoder, src0, src1, node);
+        case GGML_OP_SILU_BACK:
+            return ggml_webgpu_silu_back(ctx, encoder, src0, src1, node);
+        case GGML_OP_SOFT_MAX_BACK:
+            return ggml_webgpu_soft_max_back(ctx, encoder, src0, src1, node);
         case GGML_OP_NORM:
         case GGML_OP_RMS_NORM:
         case GGML_OP_L2_NORM:
@@ -3890,6 +3990,17 @@ static bool ggml_backend_webgpu_device_supports_op(ggml_backend_dev_t dev, const
         case GGML_OP_GET_ROWS_BACK:
             supports_op = src0->type == GGML_TYPE_F32 && op->type == GGML_TYPE_F32;
             break;
+        case GGML_OP_SILU_BACK:
+            supports_op = op->type == GGML_TYPE_F32 && src0->type == GGML_TYPE_F32 &&
+                          src1->type == GGML_TYPE_F32;
+            break;
+        case GGML_OP_SOFT_MAX_BACK: {
+            float max_bias = 0.0f;
+            memcpy(&max_bias, (const float *) op->op_params + 1, sizeof(float));
+            supports_op = op->type == GGML_TYPE_F32 && src0->type == GGML_TYPE_F32 &&
+                          src1->type == GGML_TYPE_F32 && max_bias == 0.0f;
+            break;
+        }
         case GGML_OP_CPY:
         case GGML_OP_CONT:
             supports_op = ((op->type == GGML_TYPE_F32 || op->type == GGML_TYPE_F16) &&

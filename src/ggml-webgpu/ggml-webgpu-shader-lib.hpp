@@ -803,6 +803,8 @@ class ggml_webgpu_shader_lib {
     std::unordered_map<int, webgpu_pipeline> out_prod_pipelines;        // f32 only, no variants
     std::unordered_map<int, webgpu_pipeline> repeat_back_pipelines;     // f32 only, no variants
     std::unordered_map<int, webgpu_pipeline> get_rows_back_pipelines;   // f32 only, no variants
+    std::unordered_map<int, webgpu_pipeline> silu_back_pipelines;       // f32 only
+    std::unordered_map<int, webgpu_pipeline> soft_max_back_pipelines;   // f32 only
     std::unordered_map<ggml_webgpu_flash_attn_pipeline_key, webgpu_pipeline, ggml_webgpu_flash_attn_pipeline_key_hash>
         flash_attn_pipelines;
     std::unordered_map<ggml_webgpu_flash_attn_vec_reduce_pipeline_key,
@@ -1974,6 +1976,34 @@ class ggml_webgpu_shader_lib {
         pipeline.context           = decisions;
         repeat_back_pipelines[0]   = pipeline;
         return repeat_back_pipelines[0];
+    }
+
+    webgpu_pipeline get_silu_back_pipeline(const ggml_webgpu_shader_lib_context & context) {
+        auto it = silu_back_pipelines.find(0);
+        if (it != silu_back_pipelines.end()) return it->second;
+        const uint32_t wg = std::min(context.max_wg_size, 256u);
+        std::vector<std::string> defines = { std::string("WG_SIZE=") + std::to_string(wg) };
+        auto processed             = preprocessor.preprocess(wgsl_silu_back, defines);
+        auto decisions             = std::make_shared<ggml_webgpu_generic_shader_decisions>();
+        decisions->wg_size         = wg;
+        webgpu_pipeline pipeline   = ggml_webgpu_create_pipeline(device, processed, "silu_back_f32");
+        pipeline.context           = decisions;
+        silu_back_pipelines[0]     = pipeline;
+        return silu_back_pipelines[0];
+    }
+
+    webgpu_pipeline get_soft_max_back_pipeline(const ggml_webgpu_shader_lib_context & context) {
+        auto it = soft_max_back_pipelines.find(0);
+        if (it != soft_max_back_pipelines.end()) return it->second;
+        const uint32_t wg = std::min(context.max_wg_size, 128u);
+        std::vector<std::string> defines = { std::string("WG_SIZE=") + std::to_string(wg) };
+        auto processed              = preprocessor.preprocess(wgsl_soft_max_back, defines);
+        auto decisions              = std::make_shared<ggml_webgpu_generic_shader_decisions>();
+        decisions->wg_size          = wg;
+        webgpu_pipeline pipeline    = ggml_webgpu_create_pipeline(device, processed, "soft_max_back_f32");
+        pipeline.context            = decisions;
+        soft_max_back_pipelines[0]  = pipeline;
+        return soft_max_back_pipelines[0];
     }
 
     webgpu_pipeline get_get_rows_back_pipeline(const ggml_webgpu_shader_lib_context & context) {
