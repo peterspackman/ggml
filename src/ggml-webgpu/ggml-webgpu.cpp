@@ -3801,14 +3801,6 @@ static bool create_webgpu_device(ggml_backend_webgpu_reg_context * ctx) {
         }
     }
     ctx->webgpu_global_ctx->capabilities.supports_subgroup_matrix = valid_subgroup_matrix_config;
-    // Allow disabling the subgroup-matrix path for precision-sensitive workloads.
-    // The subgroup-matrix mul_mat accumulates in f16 and can lose ~1% per matmul,
-    // which compounds badly through deep networks (especially in backward passes).
-    if (const char * env = std::getenv("GGML_WEBGPU_DISABLE_SUBGROUP_MATRIX")) {
-        if (env[0] != '\0' && env[0] != '0') {
-            ctx->webgpu_global_ctx->capabilities.supports_subgroup_matrix = false;
-        }
-    }
 #endif
 
     // For subgroup matrix code to be the most efficient, we would like the subgroup size to be consistent and accurate.
