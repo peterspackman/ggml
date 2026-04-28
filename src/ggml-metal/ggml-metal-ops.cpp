@@ -278,6 +278,18 @@ static int ggml_metal_op_encode_impl(ggml_metal_op_t ctx, int idx) {
             {
                 n_fuse = ggml_metal_op_add1(ctx, idx);
             } break;
+        case GGML_OP_SILU_BACK:
+            {
+                n_fuse = ggml_metal_op_silu_back(ctx, idx);
+            } break;
+        case GGML_OP_RMS_NORM_BACK:
+            {
+                n_fuse = ggml_metal_op_rms_norm_back(ctx, idx);
+            } break;
+        case GGML_OP_SOFT_MAX_BACK:
+            {
+                n_fuse = ggml_metal_op_soft_max_back(ctx, idx);
+            } break;
         case GGML_OP_ADD_ID:
             {
                 n_fuse = ggml_metal_op_add_id(ctx, idx);
@@ -829,6 +841,163 @@ int ggml_metal_op_add1(ggml_metal_op_t ctx, int idx) {
     const int n_tg = (n + nth - 1) / nth;
 
     ggml_metal_encoder_dispatch_threadgroups(enc, n_tg, 1, 1, nth, 1, 1);
+
+    return 1;
+}
+
+int ggml_metal_op_silu_back(ggml_metal_op_t ctx, int idx) {
+    // SILU_BACK: dst = dy * sigmoid(x) * (1 + x*(1 - sigmoid(x)))
+    //   src[0] = dy, src[1] = x, dst = dx
+    ggml_tensor * op = ctx->node(idx);
+
+    ggml_metal_library_t lib = ctx->lib;
+    ggml_metal_encoder_t enc = ctx->enc;
+
+    GGML_ASSERT(op->src[0]->type == GGML_TYPE_F32);
+    GGML_ASSERT(op->src[1]->type == GGML_TYPE_F32);
+    GGML_ASSERT(op->type        == GGML_TYPE_F32);
+    GGML_ASSERT(ggml_are_same_shape(op->src[0], op->src[1]));
+    GGML_ASSERT(ggml_are_same_shape(op->src[0], op));
+    GGML_ASSERT(ggml_is_contiguous(op->src[0]));
+    GGML_ASSERT(ggml_is_contiguous(op->src[1]));
+    GGML_ASSERT(ggml_is_contiguous(op));
+
+    int64_t n = ggml_nelements(op);
+
+    auto pipeline = ggml_metal_library_get_pipeline(lib, "kernel_silu_back_f32");
+    if (!pipeline.pipeline) {
+        pipeline = ggml_metal_library_compile_pipeline(lib, "kernel_silu_back_f32", "kernel_silu_back_f32", nullptr);
+    }
+    GGML_ASSERT(pipeline.pipeline != nullptr);
+
+    ggml_metal_encoder_set_pipeline(enc, pipeline);
+    ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(op->src[0]), 0);
+    ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(op->src[1]), 1);
+    ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(op),         2);
+    ggml_metal_encoder_set_bytes   (enc, &n, sizeof(n), 3);
+
+    const int nth = std::min(n, (int64_t)256);
+    const int n_tg = (n + nth - 1) / nth;
+
+    ggml_metal_encoder_dispatch_threadgroups(enc, n_tg, 1, 1, nth, 1, 1);
+
+    return 1;
+}
+
+// Picks a power-of-two threadgroup size up to the pipeline's max, sized to
+// cover nc with one or a few strides per thread. Returns ntg and matching
+// nsg (number of simdgroups), with nsg up to 32.
+static int ggml_metal_pick_row_reduce_ntg(ggml_metal_pipeline_with_params pipeline, int64_t nc) {
+    int ntg = 32;
+    while (ntg * 2 <= nc && ntg < 1024) {
+        ntg *= 2;
+    }
+    ntg = std::min(ntg, ggml_metal_pipeline_max_theads_per_threadgroup(pipeline));
+    return ntg;
+}
+
+int ggml_metal_op_rms_norm_back(ggml_metal_op_t ctx, int idx) {
+    ggml_tensor * op = ctx->node(idx);
+
+    ggml_metal_library_t lib = ctx->lib;
+    ggml_metal_encoder_t enc = ctx->enc;
+
+    GGML_ASSERT(op->src[0]->type == GGML_TYPE_F32);
+    GGML_ASSERT(op->src[1]->type == GGML_TYPE_F32);
+    GGML_ASSERT(op->type        == GGML_TYPE_F32);
+    GGML_ASSERT(ggml_are_same_shape(op->src[0], op->src[1]));
+    GGML_ASSERT(ggml_are_same_shape(op->src[0], op));
+    GGML_ASSERT(op->src[0]->nb[0] == sizeof(float));
+    GGML_ASSERT(op->src[1]->nb[0] == sizeof(float));
+    GGML_ASSERT(op->nb[0]         == sizeof(float));
+
+    float eps;
+    memcpy(&eps, op->op_params, sizeof(float));
+
+    const int64_t nc     = op->ne[0];
+    const int64_t n_rows = ggml_nrows(op);
+
+    ggml_metal_kargs_rms_norm_back args = {
+        /*.nc         =*/ (int32_t) nc,
+        /*.n_rows     =*/ (int32_t) n_rows,
+        /*.nb_dz_row  =*/ op->src[0]->nb[1],
+        /*.nb_x_row   =*/ op->src[1]->nb[1],
+        /*.nb_dst_row =*/ op->nb[1],
+        /*.eps        =*/ eps,
+    };
+
+    auto pipeline = ggml_metal_library_get_pipeline(lib, "kernel_rms_norm_back_f32");
+    if (!pipeline.pipeline) {
+        pipeline = ggml_metal_library_compile_pipeline(lib, "kernel_rms_norm_back_f32", "kernel_rms_norm_back_f32", nullptr);
+    }
+    GGML_ASSERT(pipeline.pipeline != nullptr);
+
+    const int ntg = ggml_metal_pick_row_reduce_ntg(pipeline, nc);
+    const int nsg = (ntg + 31) / 32;
+
+    ggml_metal_encoder_set_pipeline(enc, pipeline);
+    ggml_metal_encoder_set_bytes   (enc, &args, sizeof(args), 0);
+    ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(op->src[0]), 1);
+    ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(op->src[1]), 2);
+    ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(op),         3);
+    ggml_metal_encoder_set_threadgroup_memory_size(enc, nsg * sizeof(float), 0);
+    ggml_metal_encoder_set_threadgroup_memory_size(enc, nsg * sizeof(float), 1);
+
+    ggml_metal_encoder_dispatch_threadgroups(enc, n_rows, 1, 1, ntg, 1, 1);
+
+    return 1;
+}
+
+int ggml_metal_op_soft_max_back(ggml_metal_op_t ctx, int idx) {
+    ggml_tensor * op = ctx->node(idx);
+
+    ggml_metal_library_t lib = ctx->lib;
+    ggml_metal_encoder_t enc = ctx->enc;
+
+    GGML_ASSERT(op->src[0]->type == GGML_TYPE_F32);
+    GGML_ASSERT(op->src[1]->type == GGML_TYPE_F32);
+    GGML_ASSERT(op->type        == GGML_TYPE_F32);
+    GGML_ASSERT(ggml_are_same_shape(op->src[0], op->src[1]));
+    GGML_ASSERT(ggml_are_same_shape(op->src[0], op));
+    GGML_ASSERT(op->src[0]->nb[0] == sizeof(float));
+    GGML_ASSERT(op->src[1]->nb[0] == sizeof(float));
+    GGML_ASSERT(op->nb[0]         == sizeof(float));
+
+    float scale    = 1.0f;
+    float max_bias = 0.0f;
+    memcpy(&scale,    (const char *) op->op_params + 0,             sizeof(float));
+    memcpy(&max_bias, (const char *) op->op_params + sizeof(float), sizeof(float));
+    GGML_ASSERT(max_bias == 0.0f && "soft_max_back with ALiBi bias not supported on metal");
+
+    const int64_t nc     = op->ne[0];
+    const int64_t n_rows = ggml_nrows(op);
+
+    ggml_metal_kargs_soft_max_back args = {
+        /*.nc         =*/ (int32_t) nc,
+        /*.n_rows     =*/ (int32_t) n_rows,
+        /*.nb_dy_row  =*/ op->src[0]->nb[1],
+        /*.nb_y_row   =*/ op->src[1]->nb[1],
+        /*.nb_dst_row =*/ op->nb[1],
+        /*.scale      =*/ scale,
+    };
+
+    auto pipeline = ggml_metal_library_get_pipeline(lib, "kernel_soft_max_back_f32");
+    if (!pipeline.pipeline) {
+        pipeline = ggml_metal_library_compile_pipeline(lib, "kernel_soft_max_back_f32", "kernel_soft_max_back_f32", nullptr);
+    }
+    GGML_ASSERT(pipeline.pipeline != nullptr);
+
+    const int ntg = ggml_metal_pick_row_reduce_ntg(pipeline, nc);
+    const int nsg = (ntg + 31) / 32;
+
+    ggml_metal_encoder_set_pipeline(enc, pipeline);
+    ggml_metal_encoder_set_bytes   (enc, &args, sizeof(args), 0);
+    ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(op->src[0]), 1);
+    ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(op->src[1]), 2);
+    ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(op),         3);
+    ggml_metal_encoder_set_threadgroup_memory_size(enc, nsg * sizeof(float), 0);
+
+    ggml_metal_encoder_dispatch_threadgroups(enc, n_rows, 1, 1, ntg, 1, 1);
 
     return 1;
 }

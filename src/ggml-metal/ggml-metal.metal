@@ -10670,3 +10670,135 @@ kernel void kernel_add1_f32(
         dst[tpig] = src0[tpig] + src1[0];
     }
 }
+
+// SILU_BACK: dst = dy * sigmoid(x) * (1 + x*(1 - sigmoid(x)))
+//   src0 = dy (gradient flowing in)
+//   src1 = x  (forward input to silu)
+//   dst  = dx
+kernel void kernel_silu_back_f32(
+        device const float * src0,
+        device const float * src1,
+        device       float * dst,
+        constant   int64_t & n,
+        uint tpig[[thread_position_in_grid]]) {
+    if (tpig < uint(n)) {
+        const float x  = src1[tpig];
+        const float dy = src0[tpig];
+        const float s  = 1.0f / (1.0f + exp(-x));
+        dst[tpig] = dy * s * (1.0f + x * (1.0f - s));
+    }
+}
+
+// RMS_NORM_BACK: backward of rms_norm.
+//   src0 = dz (grad from output) [nc, n_rows]
+//   src1 = x  (forward input)    [nc, n_rows]
+//   dst  = dx                    [nc, n_rows]
+// Per row:
+//   sum_xx  = sum(x*x);   sum_xdz = sum(x*dz)
+//   sum_eps = sum_xx + eps*nc
+//   rrms    = 1 / sqrt(sum_xx/nc + eps)
+//   dx[i]   = (x[i] * (-sum_xdz / sum_eps) + dz[i]) * rrms
+// One threadgroup per row; threads stride over the row.
+kernel void kernel_rms_norm_back_f32(
+        constant ggml_metal_kargs_rms_norm_back & args,
+        device const char * src0,
+        device const char * src1,
+        device       char * dst,
+        threadgroup float * shmem_xx [[threadgroup(0)]],
+        threadgroup float * shmem_xdz [[threadgroup(1)]],
+        uint3   tgpig[[threadgroup_position_in_grid]],
+        ushort  tiisg[[thread_index_in_simdgroup]],
+        ushort  sgitg[[simdgroup_index_in_threadgroup]],
+        ushort3 tpitg[[thread_position_in_threadgroup]],
+        ushort3   ntg[[threads_per_threadgroup]]) {
+    const int row = tgpig.x;
+    if (row >= args.n_rows) {
+        return;
+    }
+
+    device const float * dz = (device const float *) (src0 + row * args.nb_dz_row);
+    device const float * x  = (device const float *) (src1 + row * args.nb_x_row);
+    device       float * dx = (device       float *) (dst  + row * args.nb_dst_row);
+
+    float partial_xx  = 0.0f;
+    float partial_xdz = 0.0f;
+    for (int i = tpitg.x; i < args.nc; i += ntg.x) {
+        const float xv  = x[i];
+        const float dzv = dz[i];
+        partial_xx  += xv * xv;
+        partial_xdz += xv * dzv;
+    }
+
+    partial_xx  = simd_sum(partial_xx);
+    partial_xdz = simd_sum(partial_xdz);
+
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    if (tiisg == 0) {
+        shmem_xx [sgitg] = partial_xx;
+        shmem_xdz[sgitg] = partial_xdz;
+    }
+
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    partial_xx  = shmem_xx [tiisg];
+    partial_xdz = shmem_xdz[tiisg];
+    partial_xx  = simd_sum(partial_xx);
+    partial_xdz = simd_sum(partial_xdz);
+
+    const float n        = (float) args.nc;
+    const float sum_eps  = partial_xx + args.eps * n;
+    const float mean_eps = partial_xx / n + args.eps;
+    const float rrms     = 1.0f / sqrt(mean_eps);
+    const float coeff    = -partial_xdz / sum_eps;
+
+    for (int i = tpitg.x; i < args.nc; i += ntg.x) {
+        dx[i] = (x[i] * coeff + dz[i]) * rrms;
+    }
+}
+
+// SOFT_MAX_BACK: backward of softmax.
+//   src0 = dy [nc, n_rows]
+//   src1 = y  [nc, n_rows] (forward output)
+//   dst  = dx [nc, n_rows]
+// Per row: dot = sum(y * dy); dx[i] = scale * (dy[i] - dot) * y[i].
+kernel void kernel_soft_max_back_f32(
+        constant ggml_metal_kargs_soft_max_back & args,
+        device const char * src0,
+        device const char * src1,
+        device       char * dst,
+        threadgroup float * shmem [[threadgroup(0)]],
+        uint3   tgpig[[threadgroup_position_in_grid]],
+        ushort  tiisg[[thread_index_in_simdgroup]],
+        ushort  sgitg[[simdgroup_index_in_threadgroup]],
+        ushort3 tpitg[[thread_position_in_threadgroup]],
+        ushort3   ntg[[threads_per_threadgroup]]) {
+    const int row = tgpig.x;
+    if (row >= args.n_rows) {
+        return;
+    }
+
+    device const float * dy = (device const float *) (src0 + row * args.nb_dy_row);
+    device const float * y  = (device const float *) (src1 + row * args.nb_y_row);
+    device       float * dx = (device       float *) (dst  + row * args.nb_dst_row);
+
+    float partial = 0.0f;
+    for (int i = tpitg.x; i < args.nc; i += ntg.x) {
+        partial += y[i] * dy[i];
+    }
+    partial = simd_sum(partial);
+
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (tiisg == 0) {
+        shmem[sgitg] = partial;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    partial = shmem[tiisg];
+    partial = simd_sum(partial);
+    const float dot = partial;
+
+    for (int i = tpitg.x; i < args.nc; i += ntg.x) {
+        dx[i] = args.scale * (dy[i] - dot) * y[i];
+    }
+}

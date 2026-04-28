@@ -1082,6 +1082,27 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
             return op->src[0]->type == GGML_TYPE_F32;
         case GGML_OP_GET_ROWS_BACK:
             return op->src[0]->type == GGML_TYPE_F32 && op->type == GGML_TYPE_F32;
+        case GGML_OP_SILU_BACK:
+            return op->src[0]->type == GGML_TYPE_F32 &&
+                   op->src[1]->type == GGML_TYPE_F32 &&
+                   ggml_is_contiguous(op->src[0]) &&
+                   ggml_is_contiguous(op->src[1]);
+        case GGML_OP_RMS_NORM_BACK:
+            return has_simdgroup_reduction &&
+                   op->src[0]->type == GGML_TYPE_F32 &&
+                   op->src[1]->type == GGML_TYPE_F32 &&
+                   op->src[0]->nb[0] == ggml_type_size(GGML_TYPE_F32) &&
+                   op->src[1]->nb[0] == ggml_type_size(GGML_TYPE_F32);
+        case GGML_OP_SOFT_MAX_BACK: {
+            float max_bias = 0.0f;
+            memcpy(&max_bias, (const char *) op->op_params + sizeof(float), sizeof(float));
+            return has_simdgroup_reduction &&
+                   op->src[0]->type == GGML_TYPE_F32 &&
+                   op->src[1]->type == GGML_TYPE_F32 &&
+                   op->src[0]->nb[0] == ggml_type_size(GGML_TYPE_F32) &&
+                   op->src[1]->nb[0] == ggml_type_size(GGML_TYPE_F32) &&
+                   max_bias == 0.0f;
+        }
         case GGML_OP_CONV_TRANSPOSE_2D:
             return ggml_is_contiguous(op->src[0]) && ggml_is_contiguous(op->src[1]) &&
                 (op->src[0]->type == GGML_TYPE_F16 || op->src[0]->type == GGML_TYPE_F32) &&

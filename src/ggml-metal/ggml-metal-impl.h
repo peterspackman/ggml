@@ -283,6 +283,28 @@ typedef struct {
     uint64_t nb1;         // dst row stride in bytes
 } ggml_metal_kargs_get_rows_back;
 
+// rms_norm_back: backward of rms_norm.
+// src0 = dz [nc, n_rows], src1 = x [nc, n_rows], dst = dx [nc, n_rows].
+typedef struct {
+    int32_t  nc;
+    int32_t  n_rows;
+    uint64_t nb_dz_row;
+    uint64_t nb_x_row;
+    uint64_t nb_dst_row;
+    float    eps;
+} ggml_metal_kargs_rms_norm_back;
+
+// soft_max_back: backward of softmax.
+// src0 = dy [nc, n_rows], src1 = y [nc, n_rows], dst = dx [nc, n_rows].
+typedef struct {
+    int32_t  nc;
+    int32_t  n_rows;
+    uint64_t nb_dy_row;
+    uint64_t nb_y_row;
+    uint64_t nb_dst_row;
+    float    scale;
+} ggml_metal_kargs_soft_max_back;
+
 typedef struct {
     int64_t  nk0;
     int64_t  ne00;
